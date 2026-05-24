@@ -1,10 +1,11 @@
+import type { Metadata } from 'next';
 import App from '../src/App';
-import { ApnaProvider } from '../src/apna-provider';
+
+export const metadata: Metadata = {
+  title: 'Apna IM',
+  description: 'Apna mini-app for WebRTC voice and video calls.',
+};
 
 export default function Page() {
-  return (
-    <ApnaProvider appId="im-mini-app">
-      <App />
-    </ApnaProvider>
-  );
+  return <App />;
 }

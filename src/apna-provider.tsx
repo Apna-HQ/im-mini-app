@@ -1,74 +1,151 @@
-'use client';
+"use client";
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import type { ApnaApp } from '@apna/sdk';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
+import {
+  EventName,
+  type ApnaApp,
+  type ApnaIdentityDomain,
+  type ApnaSocialDomain,
+} from "@apna/sdk";
+import { setCustomiseHighlight } from "@apna/sdk/ui";
 
-interface ApnaContextValue {
+const APP_ID = "im-mini-app";
+
+type HostResolvedTheme = "light" | "dark";
+
+interface ApnaContextType {
+  remoteComponentSelections?: {
+    [appId: string]: {
+      [remoteModuleName: string]: string;
+    };
+  };
   apna: ApnaApp;
+  toggleHighlight: () => void;
+  isHighlighted: boolean;
+  /** High-level social domain — use apna.social.v1.* for new call sites. */
+  social?: ApnaSocialDomain;
+  /** High-level identity domain — use apna.identity.v1.* for new call sites. */
+  identity?: ApnaIdentityDomain;
 }
 
-const ApnaContext = createContext<ApnaContextValue | null>(null);
+export const ApnaContext = createContext<ApnaContextType | null>(null);
 
-export function useApna(): ApnaContextValue {
-  const ctx = useContext(ApnaContext);
-  if (!ctx) throw new Error('useApna must be used inside <ApnaProvider>');
-  return ctx;
-}
+export const useApna = () => {
+  const context = useContext(ApnaContext);
+  if (!context) {
+    throw new Error("useApna must be used within a ApnaProvider");
+  }
+  return context;
+};
 
-interface ApnaProviderProps {
-  appId: string;
-  children: React.ReactNode;
-}
-
-export function ApnaProvider({ appId, children }: ApnaProviderProps) {
-  const [apna, setApna] = useState<ApnaApp | null>(null);
+export function ApnaProvider({ children }: { children: React.ReactNode }) {
+  const [apna, setApna] = useState<ApnaApp>();
+  const [social, setSocial] = useState<ApnaSocialDomain>();
+  const [identity, setIdentity] = useState<ApnaIdentityDomain>();
+  const [isHighlighted, setIsHighlighted] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let disposed = false;
-    let instance: ApnaApp | null = null;
+  const toggleHighlight = useCallback(() => {
+    setIsHighlighted((prev) => {
+      const next = !prev;
+      setCustomiseHighlight(next);
+      return next;
+    });
+  }, []);
 
-    import('@apna/sdk')
-      .then(({ ApnaApp }) => {
-        if (disposed) return;
-        instance = new ApnaApp({ appId });
-        return instance.ready;
-      })
-      .then(() => {
-        if (!disposed && instance) setApna(instance);
-      })
-      .catch((err: Error) => {
-        if (!disposed) setError(err.message);
-      });
+  const applyHostTheme = useCallback((theme: HostResolvedTheme) => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+    document.documentElement.style.colorScheme = theme;
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    let cleanup: (() => void) | undefined;
+
+    const init = async () => {
+      try {
+        const { ApnaApp } = await import("@apna/sdk");
+        const instance = new ApnaApp({ appId: APP_ID });
+        await instance.ready;
+        const offHighlight = instance.on(
+          EventName.CustomiseToggleHighlight,
+          toggleHighlight
+        );
+        const offTheme = instance.on(EventName.ThemeChanged, (payload) => {
+          if (!isHostThemePayload(payload)) return;
+          applyHostTheme(payload.theme);
+        });
+        setApna(instance);
+        setSocial(instance.social);
+        setIdentity(instance.identity);
+        setLoading(false);
+        return () => {
+          offHighlight();
+          offTheme();
+        };
+      } catch (err) {
+        setError((err as Error).message);
+        setLoading(false);
+        return undefined;
+      }
+    };
+
+    void init().then((off) => {
+      cleanup = off;
+    });
 
     return () => {
-      disposed = true;
-      instance?.dispose();
+      cleanup?.();
     };
-  }, [appId]);
+  }, [applyHostTheme, toggleHighlight]);
 
   if (error) {
     return (
       <main className="shell center-state">
         <div className="status-panel">
           <h1>Apna IM</h1>
-          <p>Open this mini-app inside Apna to connect identity, messaging, and permissions.</p>
+          <p>
+            Open this mini-app inside Apna to connect identity, messaging, and
+            permissions.
+          </p>
           <pre>{error}</pre>
         </div>
       </main>
     );
   }
 
-  if (!apna) {
+  if (!apna || loading) {
     return (
       <main className="shell center-state">
         <div className="status-panel">
           <h1>Apna IM</h1>
-          <p>Connecting to Apna host...</p>
+          <p>Booting the App...</p>
         </div>
       </main>
     );
   }
 
-  return <ApnaContext.Provider value={{ apna }}>{children}</ApnaContext.Provider>;
+  return (
+    <ApnaContext.Provider
+      value={{ apna, social, identity, isHighlighted, toggleHighlight }}
+    >
+      {children}
+    </ApnaContext.Provider>
+  );
+}
+
+function isHostThemePayload(
+  payload: unknown
+): payload is { theme: HostResolvedTheme } {
+  if (!payload || typeof payload !== "object") return false;
+  const theme = (payload as { theme?: unknown }).theme;
+  return theme === "dark" || theme === "light";
 }

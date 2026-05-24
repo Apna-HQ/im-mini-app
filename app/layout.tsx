@@ -1,10 +1,7 @@
-import type { Metadata } from 'next';
-import '../src/styles.css';
+"use client";
 
-export const metadata: Metadata = {
-  title: 'Apna IM',
-  description: 'Apna mini-app for WebRTC voice and video calls.',
-};
+import '../src/styles.css';
+import { ApnaProvider } from '../src/apna-provider';
 
 export default function RootLayout({
   children,
@@ -13,7 +10,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <ApnaProvider>{children}</ApnaProvider>
+      </body>
     </html>
   );
 }
