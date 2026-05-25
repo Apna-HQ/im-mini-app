@@ -4,11 +4,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DirectMessage, UserProfile } from '@apna/sdk';
 import * as nip19 from 'nostr-tools/nip19';
 import {
+  ArrowLeft,
+  Camera,
   Check,
+  ContactRound,
   Keyboard,
   MessageCircle,
   Mic,
   MicOff,
+  Moon,
+  MoreVertical,
+  Paperclip,
   Phone,
   PhoneCall,
   PhoneOff,
@@ -17,7 +23,9 @@ import {
   RefreshCw,
   Search,
   Send,
-  Trash2,
+  ShieldCheck,
+  Smile,
+  Sun,
   UserRound,
   Video,
   VideoOff,
@@ -91,9 +99,10 @@ interface BarcodeDetectorShape {
 
 type BarcodeDetectorCtor = new (options?: { formats?: string[] }) => BarcodeDetectorShape;
 type CallState = 'idle' | 'ready' | 'calling' | 'ringing' | 'connecting' | 'connected';
+type AppTab = 'chats' | 'calls' | 'contacts';
 
 function App() {
-  const { apna } = useApna();
+  const { apna, theme, toggleTheme } = useApna();
   const [selfPubkey, setSelfPubkey] = useState('');
   const [selfProfile, setSelfProfile] = useState<UserProfile | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -104,6 +113,8 @@ function App() {
   const [addingContact, setAddingContact] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scannerStatus, setScannerStatus] = useState('');
+  const [activeTab, setActiveTab] = useState<AppTab>('chats');
+  const [chatOpen, setChatOpen] = useState(false);
   const [composerText, setComposerText] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [callId, setCallId] = useState('');
@@ -150,6 +161,15 @@ function App() {
       );
     });
   }, [contacts, searchQuery]);
+
+  const tabContacts = useMemo(() => {
+    if (activeTab === 'calls') {
+      return visibleContacts.filter((contact) =>
+        messages.some((message) => message.peerPubkey === contact.pubkey)
+      );
+    }
+    return visibleContacts;
+  }, [activeTab, messages, visibleContacts]);
 
   const activeMessages = useMemo(
     () => messages.filter((message) => message.peerPubkey === selectedPubkey),
@@ -637,7 +657,10 @@ function App() {
   function removeContact(pubkey: string) {
     const next = contacts.filter((contact) => contact.pubkey !== pubkey);
     saveContacts(next);
-    if (selectedPubkey === pubkey) setSelectedPubkey(next[0]?.pubkey || '');
+    if (selectedPubkey === pubkey) {
+      setSelectedPubkey(next[0]?.pubkey || '');
+      setChatOpen(false);
+    }
   }
 
   async function sendMessage() {
@@ -896,22 +919,55 @@ function App() {
   const selectedTitle = selectedContact?.label || shortPubkey(selectedPubkey);
 
   return (
-    <main className="shell chat-shell">
+    <main
+      className={`shell chat-shell tab-${activeTab}${
+        chatOpen && selectedPubkey ? ' chat-open' : ''
+      }`}
+    >
       <aside className="sidebar" aria-label="Contacts">
         <header className="sidebar-header">
+          <div className="brand-lockup">
+            <MessageCircle size={22} />
+            <h1>IM Mini App</h1>
+          </div>
+          <div className="top-actions">
+            <button
+              type="button"
+              className="appbar-button"
+              onClick={toggleTheme}
+              title="Toggle theme"
+            >
+              {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
+            </button>
+            <button type="button" className="appbar-button" title="Search">
+              <Search size={20} />
+            </button>
+            <button type="button" className="appbar-button" title="More">
+              <MoreVertical size={20} />
+            </button>
+          </div>
+        </header>
+
+        <div className="tab-title-row">
           <div>
-            <p className="eyebrow">Apna IM</p>
-            <h1>Chats</h1>
+            <p className="eyebrow">
+              {activeTab === 'calls'
+                ? 'Recent calls'
+                : activeTab === 'contacts'
+                  ? 'Saved npubs'
+                  : 'Nostr DMs'}
+            </p>
+            <h2>{activeTab === 'calls' ? 'Calls' : activeTab === 'contacts' ? 'Contacts' : 'Chats'}</h2>
           </div>
           <button
             type="button"
-            className="icon-button"
+            className="fab-inline"
             onClick={() => setAddingContact(true)}
             title="Add contact"
           >
             <Plus size={19} />
           </button>
-        </header>
+        </div>
 
         <div className="identity-row" title={selfPubkey || 'Connecting'}>
           <div className="avatar self-avatar">
@@ -933,14 +989,18 @@ function App() {
         </div>
 
         <div className="contact-list">
-          {visibleContacts.length === 0 ? (
+          {tabContacts.length === 0 ? (
             <div className="empty-state">
-              <MessageCircle size={28} />
-              <strong>No contacts yet</strong>
-              <span>Add an npub manually or scan a QR code.</span>
+              {activeTab === 'calls' ? <Phone size={28} /> : <MessageCircle size={28} />}
+              <strong>{activeTab === 'calls' ? 'No calls yet' : 'No contacts yet'}</strong>
+              <span>
+                {activeTab === 'calls'
+                  ? 'Start a voice or video call from a chat.'
+                  : 'Add an npub manually or scan a QR code.'}
+              </span>
             </div>
           ) : (
-            visibleContacts.map((contact) => (
+            tabContacts.map((contact) => (
               <button
                 key={contact.pubkey}
                 type="button"
@@ -949,12 +1009,21 @@ function App() {
                     ? 'contact-row contact-row-active'
                     : 'contact-row'
                 }
-                onClick={() => setSelectedPubkey(contact.pubkey)}
+                onClick={() => {
+                  setSelectedPubkey(contact.pubkey);
+                  setChatOpen(true);
+                }}
               >
                 <div className="avatar">{initials(contact.label)}</div>
                 <div className="contact-main">
-                  <strong>{contact.label}</strong>
-                  <span>{lastMessagePreview(messages, contact.pubkey) || contact.npub}</span>
+                  <div className="contact-line">
+                    <strong>{contact.label}</strong>
+                    <time>{lastMessageTimeLabel(messages, contact.pubkey)}</time>
+                  </div>
+                  <div className="contact-line contact-preview">
+                    <span>{lastMessagePreview(messages, contact.pubkey) || contact.npub}</span>
+                    {activeTab === 'calls' ? <Phone size={16} /> : null}
+                  </div>
                 </div>
               </button>
             ))
@@ -967,23 +1036,62 @@ function App() {
             Sync
           </button>
         </footer>
+
+        <button type="button" className="floating-compose" onClick={() => setAddingContact(true)}>
+          <MessageCircle size={25} />
+        </button>
+
+        <nav className="bottom-nav" aria-label="IM navigation">
+          <button
+            type="button"
+            className={activeTab === 'chats' ? 'bottom-nav-active' : ''}
+            onClick={() => setActiveTab('chats')}
+          >
+            <MessageCircle size={20} />
+            <span>Chats</span>
+          </button>
+          <button
+            type="button"
+            className={activeTab === 'calls' ? 'bottom-nav-active' : ''}
+            onClick={() => setActiveTab('calls')}
+          >
+            <Phone size={20} />
+            <span>Calls</span>
+          </button>
+          <button
+            type="button"
+            className={activeTab === 'contacts' ? 'bottom-nav-active' : ''}
+            onClick={() => setActiveTab('contacts')}
+          >
+            <ContactRound size={20} />
+            <span>Contacts</span>
+          </button>
+        </nav>
       </aside>
 
-      <section className="conversation" aria-label="Conversation">
+      <section className="conversation chat-bg" aria-label="Conversation">
         {selectedPubkey ? (
           <>
             <header className="conversation-header">
+              <button
+                type="button"
+                className="appbar-button back-button"
+                onClick={() => setChatOpen(false)}
+                title="Back to chats"
+              >
+                <ArrowLeft size={21} />
+              </button>
               <div className="peer-summary">
                 <div className="avatar">{initials(selectedTitle)}</div>
                 <div>
                   <h2>{selectedTitle}</h2>
-                  <span>{shortPubkey(selectedPubkey)}</span>
+                  <span>encrypted · {shortPubkey(selectedPubkey)}</span>
                 </div>
               </div>
               <div className="header-actions">
                 <button
                   type="button"
-                  className="icon-button"
+                  className="appbar-button"
                   onClick={() => void startCall(selectedPubkey, false)}
                   disabled={callState !== 'ready'}
                   title="Start voice call"
@@ -992,7 +1100,7 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  className="icon-button"
+                  className="appbar-button"
                   onClick={() => void startCall(selectedPubkey, true)}
                   disabled={callState !== 'ready'}
                   title="Start video call"
@@ -1001,16 +1109,17 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  className="icon-button danger-icon"
+                  className="appbar-button"
                   onClick={() => removeContact(selectedPubkey)}
                   title="Remove contact"
                 >
-                  <Trash2 size={18} />
+                  <MoreVertical size={19} />
                 </button>
               </div>
             </header>
 
             <div className="messages-pane">
+              <div className="date-chip">TODAY</div>
               {activeMessages.length === 0 ? (
                 <div className="thread-empty">
                   <MessageCircle size={34} />
@@ -1021,19 +1130,33 @@ function App() {
                 activeMessages.map((message) => (
                   <div
                     key={message.id}
-                    className={message.outgoing ? 'bubble bubble-out' : 'bubble bubble-in'}
+                    className={
+                      message.outgoing
+                        ? 'message-row message-row-out'
+                        : 'message-row message-row-in'
+                    }
                   >
-                    <p>{message.content}</p>
-                    <span>
-                      {formatMessageTime(message.createdAt)}
-                      {message.pending ? ' · sending' : ''}
-                    </span>
+                    <div className={message.outgoing ? 'bubble bubble-out' : 'bubble bubble-in'}>
+                      <p>{message.content}</p>
+                      <span>
+                        {formatMessageTime(message.createdAt)}
+                        {message.pending ? ' · sending' : message.outgoing ? ' · read' : ''}
+                      </span>
+                    </div>
                   </div>
                 ))
               )}
+              <div className="encryption-chip">
+                <ShieldCheck size={14} />
+                <span>Messages are encrypted through Nostr DMs.</span>
+              </div>
             </div>
 
             <footer className="composer">
+              <div className="composer-field">
+                <button type="button" title="Emoji">
+                  <Smile size={20} />
+                </button>
               <textarea
                 value={composerText}
                 onChange={(event) => setComposerText(event.target.value)}
@@ -1046,6 +1169,13 @@ function App() {
                 placeholder="Message"
                 rows={1}
               />
+                <button type="button" title="Attach">
+                  <Paperclip size={20} />
+                </button>
+                <button type="button" title="Camera">
+                  <Camera size={20} />
+                </button>
+              </div>
               <button
                 type="button"
                 className="send-button"
@@ -1126,7 +1256,7 @@ function App() {
 
       {addingContact && (
         <section className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="contact-modal">
+          <div className={scannerOpen ? 'contact-modal scanner-modal' : 'contact-modal'}>
             <header>
               <div>
                 <p className="eyebrow">New contact</p>
@@ -1345,6 +1475,26 @@ function lastMessagePreview(messages: ChatMessage[], pubkey: string): string {
     .filter((message) => message.peerPubkey === pubkey)
     .sort((a, b) => b.createdAt - a.createdAt)[0];
   return latest?.content || '';
+}
+
+function lastMessageTimeLabel(messages: ChatMessage[], pubkey: string): string {
+  const latest = messages
+    .filter((message) => message.peerPubkey === pubkey)
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
+  if (!latest) return '';
+
+  const date = new Date(latest.createdAt);
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) return formatMessageTime(latest.createdAt);
+
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+  }).format(date);
 }
 
 function initials(label: string): string {

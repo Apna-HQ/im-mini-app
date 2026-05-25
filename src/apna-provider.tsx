@@ -28,6 +28,8 @@ interface ApnaContextType {
   apna: ApnaApp;
   toggleHighlight: () => void;
   isHighlighted: boolean;
+  theme: HostResolvedTheme;
+  toggleTheme: () => void;
   /** High-level social domain — use apna.social.v1.* for new call sites. */
   social?: ApnaSocialDomain;
   /** High-level identity domain — use apna.identity.v1.* for new call sites. */
@@ -49,6 +51,7 @@ export function ApnaProvider({ children }: { children: React.ReactNode }) {
   const [social, setSocial] = useState<ApnaSocialDomain>();
   const [identity, setIdentity] = useState<ApnaIdentityDomain>();
   const [isHighlighted, setIsHighlighted] = useState(false);
+  const [theme, setTheme] = useState<HostResolvedTheme>("light");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -63,6 +66,16 @@ export function ApnaProvider({ children }: { children: React.ReactNode }) {
   const applyHostTheme = useCallback((theme: HostResolvedTheme) => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     document.documentElement.style.colorScheme = theme;
+    setTheme(theme);
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => {
+      const next = current === "dark" ? "light" : "dark";
+      document.documentElement.classList.toggle("dark", next === "dark");
+      document.documentElement.style.colorScheme = next;
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -135,7 +148,15 @@ export function ApnaProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <ApnaContext.Provider
-      value={{ apna, social, identity, isHighlighted, toggleHighlight }}
+      value={{
+        apna,
+        social,
+        identity,
+        isHighlighted,
+        toggleHighlight,
+        theme,
+        toggleTheme,
+      }}
     >
       {children}
     </ApnaContext.Provider>
