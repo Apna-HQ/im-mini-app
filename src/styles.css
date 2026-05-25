@@ -215,6 +215,60 @@ textarea {
   gap: 8px;
 }
 
+.top-menu {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.menu-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  width: min(260px, calc(100vw - 24px));
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent);
+  border-radius: 8px;
+  background: var(--surface-lowest);
+  box-shadow: 0 18px 54px rgba(25, 28, 30, 0.22);
+  color: var(--on-surface);
+}
+
+.menu-popover button {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 46px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 14px;
+  text-align: left;
+}
+
+.menu-popover button:hover {
+  background: var(--surface-container);
+}
+
+.menu-status {
+  margin: 10px;
+  border-radius: 999px;
+  background: var(--surface-container);
+  color: var(--on-surface-variant);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 16px;
+}
+
+.menu-status-error {
+  background: var(--error-container);
+  color: var(--on-error-container);
+}
+
 .appbar-button,
 .icon-button {
   display: inline-flex;
@@ -680,6 +734,7 @@ p {
 }
 
 .composer-field {
+  position: relative;
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr) 30px 30px;
   gap: 4px;
@@ -688,6 +743,32 @@ p {
   background: #ffffff;
   padding: 6px 10px;
   box-shadow: 0 1px 4px rgba(25, 28, 30, 0.08);
+}
+
+.emoji-tray {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 4px;
+  z-index: 12;
+  display: grid;
+  grid-template-columns: repeat(4, 36px);
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--outline-variant) 50%, transparent);
+  border-radius: 12px;
+  background: var(--surface-lowest);
+  box-shadow: 0 12px 36px rgba(25, 28, 30, 0.18);
+  padding: 8px;
+}
+
+.emoji-tray button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--surface-low);
+  color: var(--on-surface);
+  font-size: 18px;
 }
 
 .composer-field button {
@@ -804,12 +885,17 @@ textarea:disabled {
   inset: 0;
   display: grid;
   place-items: center;
+  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+    max(118px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
 }
 
 .video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  width: min(100%, 100vw);
+  height: min(100%, 100dvh);
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: #000;
 }
 
 .remote-placeholder {
@@ -840,13 +926,21 @@ textarea:disabled {
   top: 96px;
   right: 16px;
   z-index: 4;
-  width: 96px;
-  height: 160px;
+  width: min(28vw, 128px);
+  max-width: calc(100vw - 32px);
+  height: auto;
+  max-height: min(28dvh, 190px);
+  aspect-ratio: 9 / 16;
   overflow: hidden;
   border: 2px solid rgba(255, 255, 255, 0.22);
   border-radius: 12px;
   background: #2d3133;
   box-shadow: 0 16px 38px rgba(0, 0, 0, 0.36);
+}
+
+.local-preview .video {
+  width: 100%;
+  height: 100%;
 }
 
 .local-preview span {
@@ -942,6 +1036,42 @@ textarea:disabled {
   box-shadow: 0 24px 80px rgba(25, 28, 30, 0.28);
 }
 
+.contact-picker {
+  max-height: min(620px, calc(100dvh - 48px));
+}
+
+.picker-list {
+  display: grid;
+  gap: 6px;
+  min-height: 120px;
+  overflow: auto;
+}
+
+.picker-contact {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 64px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--on-surface);
+  cursor: pointer;
+  padding: 8px;
+  text-align: left;
+}
+
+.picker-contact:hover {
+  background: var(--surface-container);
+}
+
+.picker-contact span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .contact-modal header,
 .contact-modal footer {
   display: flex;
@@ -1002,7 +1132,8 @@ textarea:disabled {
   width: 100%;
   height: 100%;
   min-height: 55dvh;
-  object-fit: cover;
+  max-height: calc(100dvh - 250px);
+  object-fit: contain;
   opacity: 0.88;
 }
 

@@ -41,6 +41,9 @@ const SIGNAL_VERSION = 1;
 const SETTINGS_D_TAG = 'im-mini-app.contacts.v1';
 const DEFAULT_STUN_URL = 'stun:stun.l.google.com:19302';
 const CONTACTS_STORAGE_PREFIX = 'im-mini-app.contacts.v1';
+const CALLS_STORAGE_PREFIX = 'im-mini-app.calls.v1';
+const CALL_INVITE_TTL_MS = 2 * 60 * 1000;
+const QUICK_EMOJIS = ['👍', '🙏', '😂', '❤️', '🔥', '🎉', '👀', '✅'];
 
 type CallSignalType =
   | 'invite'
@@ -95,6 +98,19 @@ interface ChatMessage {
   pending?: boolean;
 }
 
+interface CallLog {
+  callId: string;
+  peerPubkey: string;
+  direction: 'incoming' | 'outgoing';
+  media: {
+    audio: boolean;
+    video: boolean;
+  };
+  status: 'missed' | 'declined' | 'answered' | 'ended';
+  createdAt: number;
+  updatedAt: number;
+}
+
 interface BarcodeDetectorShape {
   detect(source: CanvasImageSource): Promise<Array<{ rawValue: string }>>;
 }
@@ -118,10 +134,14 @@ function App() {
   const [showMyQr, setShowMyQr] = useState(false);
   const [myQrDataUrl, setMyQrDataUrl] = useState('');
   const [qrCopyStatus, setQrCopyStatus] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [contactPickerOpen, setContactPickerOpen] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<AppTab>('chats');
   const [chatOpen, setChatOpen] = useState(false);
   const [composerText, setComposerText] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [callLogs, setCallLogs] = useState<CallLog[]>([]);
   const [profilesByPubkey, setProfilesByPubkey] = useState<Record<string, UserProfile>>({});
   const [callId, setCallId] = useState('');
   const [callState, setCallState] = useState<CallState>('idle');
@@ -150,6 +170,10 @@ function App() {
   const callIdRef = useRef('');
   const videoEnabledRef = useRef(true);
   const messagesRef = useRef(new Map<string, ChatMessage>());
+  const contactsRef = useRef<Contact[]>([]);
+  const callLogsRef = useRef(new Map<string, CallLog>());
+  const callStateRef = useRef<CallState>('idle');
+  const incomingCallIdRef = useRef('');
 
   const selectedContact = useMemo(
     () => contacts.find((contact) => contact.pubkey === selectedPubkey) ?? null,
@@ -160,22 +184,26 @@ function App() {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return contacts;
     return contacts.filter((contact) => {
+      const profile = profilesByPubkey[contact.pubkey] ?? null;
+      const metadataText = profileSearchText(profile);
       return (
         contact.label.toLowerCase().includes(query) ||
         contact.npub.toLowerCase().includes(query) ||
-        contact.pubkey.includes(query)
+        contact.pubkey.includes(query) ||
+        metadataText.includes(query)
       );
     });
-  }, [contacts, searchQuery]);
+  }, [contacts, profilesByPubkey, searchQuery]);
 
   const tabContacts = useMemo(() => {
     if (activeTab === 'calls') {
-      return visibleContacts.filter((contact) =>
-        messages.some((message) => message.peerPubkey === contact.pubkey)
-      );
+      const byPubkey = new Map(visibleContacts.map((contact) => [contact.pubkey, contact]));
+      return latestCalls(callLogs)
+        .map((call) => byPubkey.get(call.peerPubkey))
+        .filter((contact): contact is Contact => Boolean(contact));
     }
     return visibleContacts;
-  }, [activeTab, messages, visibleContacts]);
+  }, [activeTab, callLogs, visibleContacts]);
 
   const activeMessages = useMemo(
     () => messages.filter((message) => message.peerPubkey === selectedPubkey),
@@ -188,6 +216,14 @@ function App() {
   );
 
   const selectedProfile = selectedPubkey ? profilesByPubkey[selectedPubkey] ?? null : null;
+
+  useEffect(() => {
+    callStateRef.current = callState;
+  }, [callState]);
+
+  useEffect(() => {
+    incomingCallIdRef.current = incomingCall?.callId ?? '';
+  }, [incomingCall]);
 
   const displayNameForContact = useCallback(
     (contact: Contact) => profileName(profilesByPubkey[contact.pubkey] ?? null) || contact.label,
@@ -213,6 +249,7 @@ function App() {
   const saveContacts = useCallback(
     (nextContacts: Contact[]) => {
       const sorted = sortContacts(nextContacts, messagesRef.current);
+      contactsRef.current = sorted;
       setContacts(sorted);
       if (selfPubkeyRef.current) {
         window.localStorage.setItem(
@@ -250,6 +287,7 @@ function App() {
               },
             ];
         const sorted = sortContacts(next, messagesRef.current);
+        contactsRef.current = sorted;
         if (selfPubkeyRef.current) {
           window.localStorage.setItem(
             contactsStorageKey(selfPubkeyRef.current),
@@ -261,6 +299,29 @@ function App() {
       return normalized;
     },
     []
+  );
+
+  const saveCallLogs = useCallback((nextLogs: CallLog[]) => {
+    const sorted = nextLogs.sort((a, b) => b.updatedAt - a.updatedAt);
+    callLogsRef.current = new Map(sorted.map((log) => [log.callId, log]));
+    setCallLogs(sorted);
+    if (selfPubkeyRef.current) {
+      window.localStorage.setItem(callsStorageKey(selfPubkeyRef.current), JSON.stringify(sorted));
+    }
+  }, []);
+
+  const upsertCallLog = useCallback(
+    (log: CallLog) => {
+      const existing = callLogsRef.current.get(log.callId);
+      const next = {
+        ...existing,
+        ...log,
+        updatedAt: Math.max(existing?.updatedAt ?? 0, log.updatedAt),
+      };
+      callLogsRef.current.set(log.callId, next);
+      saveCallLogs(Array.from(callLogsRef.current.values()));
+    },
+    [saveCallLogs]
   );
 
   const fetchContactProfile = useCallback(
@@ -284,6 +345,8 @@ function App() {
         (a, b) => a.createdAt - b.createdAt
       );
       setMessages(nextMessages);
+      contactsRef.current = sortContacts(contactsRef.current, messagesRef.current);
+      setContacts(contactsRef.current);
       upsertContact(message.peerPubkey, undefined, 'dm');
     },
     [upsertContact]
@@ -467,6 +530,10 @@ function App() {
       if (signal.kind !== SIGNAL_KIND || signal.version !== SIGNAL_VERSION) return;
 
       if (signal.type === 'invite') {
+        const isExpectedWakeInvite = callIdRef.current === signal.callId;
+        const isFreshInvite = Date.now() - signal.createdAt <= CALL_INVITE_TTL_MS;
+        if (!isExpectedWakeInvite && !isFreshInvite) return;
+        if (incomingCallIdRef.current === signal.callId || callStateRef.current === 'ringing') return;
         peerPubkeyRef.current = signal.from;
         callIdRef.current = signal.callId;
         setSelectedPubkey(signal.from);
@@ -478,6 +545,15 @@ function App() {
           media: signal.media ?? { audio: true, video: true },
         });
         upsertContact(signal.from, undefined, 'dm');
+        upsertCallLog({
+          callId: signal.callId,
+          peerPubkey: signal.from,
+          direction: 'incoming',
+          media: signal.media ?? { audio: true, video: true },
+          status: 'missed',
+          createdAt: signal.createdAt,
+          updatedAt: signal.createdAt,
+        });
         setCallState('ringing');
         setStatus('Incoming call');
         return;
@@ -523,15 +599,26 @@ function App() {
       }
 
       if (signal.type === 'reject') {
+        const existing = callLogsRef.current.get(signal.callId);
+        if (existing) upsertCallLog({ ...existing, status: 'declined', updatedAt: signal.createdAt });
         resetCall('Call declined');
         return;
       }
 
       if (signal.type === 'hangup') {
+        const existing = callLogsRef.current.get(signal.callId);
+        if (existing) upsertCallLog({ ...existing, status: 'ended', updatedAt: signal.createdAt });
         resetCall('Call ended');
       }
     },
-    [answerOffer, applyRemoteCandidate, flushQueuedCandidates, resetCall, upsertContact]
+    [
+      answerOffer,
+      applyRemoteCandidate,
+      flushQueuedCandidates,
+      resetCall,
+      upsertCallLog,
+      upsertContact,
+    ]
   );
 
   const handleDirectMessage = useCallback(
@@ -582,7 +669,11 @@ function App() {
         setSelfProfile(profile);
 
         const localContacts = readStoredContacts(pubkey);
+        contactsRef.current = localContacts;
         setContacts(localContacts);
+        const storedCalls = readStoredCalls(pubkey);
+        callLogsRef.current = new Map(storedCalls.map((log) => [log.callId, log]));
+        setCallLogs(storedCalls);
         setSelectedPubkey((current) => current || localContacts[0]?.pubkey || '');
 
         void loadContactsFromNostr().catch(() => undefined);
@@ -657,6 +748,16 @@ function App() {
     };
   }, [selfNpub]);
 
+  useEffect(() => {
+    if (!selfPubkey || contacts.length === 0) return;
+    const timeout = window.setTimeout(() => {
+      void syncContactsToNostr(contacts).catch(() => undefined);
+    }, 700);
+    return () => window.clearTimeout(timeout);
+    // Contacts are intentionally auto-published after local changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contacts, selfPubkey]);
+
   async function loadContactsFromNostr() {
     try {
       await apna.permissions.request([
@@ -688,27 +789,28 @@ function App() {
       const merged = mergeContacts(readStoredContacts(selfPubkeyRef.current), remoteContacts);
       saveContacts(merged);
       setSelectedPubkey((current) => current || merged[0]?.pubkey || '');
-      setSyncStatus('Contacts restored from Nostr');
+      setSyncStatus(`Loaded ${merged.length} contacts from Nostr settings`);
     } catch {
       setSyncStatus('Local contacts only');
     }
   }
 
-  async function syncContactsToNostr() {
+  async function syncContactsToNostr(nextContacts = contactsRef.current) {
     setError('');
     try {
       await apna.permissions.request([
         'nostr.publish',
         'nostr.nip04.encrypt',
       ]);
-      const content = JSON.stringify({ version: 1, contacts });
+      setSyncStatus('Auto-syncing contacts...');
+      const content = JSON.stringify({ version: 1, contacts: nextContacts });
       const encrypted = await apna.nostr.nip04.encrypt(selfPubkeyRef.current, content);
       await apna.nostr.publish({
         kind: 30078,
         content: encrypted,
         tags: [['d', SETTINGS_D_TAG]],
       });
-      setSyncStatus('Contacts synced to Nostr');
+      setSyncStatus(`Synced ${nextContacts.length} contacts to Nostr settings`);
     } catch (err) {
       setSyncStatus('Nostr sync unavailable');
       setError((err as Error).message);
@@ -727,6 +829,7 @@ function App() {
       setScannerOpen(false);
       stopScanner();
       setStatus('Contact saved');
+      void syncContactsToNostr(contactsRef.current).catch(() => undefined);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -761,6 +864,7 @@ function App() {
   function removeContact(pubkey: string) {
     const next = contacts.filter((contact) => contact.pubkey !== pubkey);
     saveContacts(next);
+    void syncContactsToNostr(next).catch(() => undefined);
     if (selectedPubkey === pubkey) {
       setSelectedPubkey(next[0]?.pubkey || '');
       setChatOpen(false);
@@ -805,6 +909,19 @@ function App() {
     }
   }
 
+  function startChatWith(pubkey: string) {
+    setSelectedPubkey(pubkey);
+    setActiveTab('chats');
+    setChatOpen(true);
+    setContactPickerOpen(false);
+    setAddingContact(false);
+  }
+
+  function insertEmoji(emoji: string) {
+    setComposerText((current) => `${current}${emoji}`);
+    setEmojiOpen(false);
+  }
+
   async function startCall(targetPubkey: string, withVideo: boolean) {
     setError('');
     setWakeStatus('');
@@ -819,6 +936,15 @@ function App() {
       setCallId(nextCallId);
       setIncomingCall(null);
       setCallState('calling');
+      upsertCallLog({
+        callId: nextCallId,
+        peerPubkey: target,
+        direction: 'outgoing',
+        media: { audio: true, video: withVideo },
+        status: 'missed',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
       setStatus(withVideo ? 'Requesting camera and microphone...' : 'Requesting microphone...');
 
       const stream = await startLocalMedia();
@@ -857,6 +983,15 @@ function App() {
       setSelectedPubkey(target);
       setCallId(incomingCall.callId);
       setCallState('connecting');
+      upsertCallLog({
+        callId: incomingCall.callId,
+        peerPubkey: target,
+        direction: 'incoming',
+        media: incomingCall.media,
+        status: 'answered',
+        createdAt: incomingCall.createdAt,
+        updatedAt: Date.now(),
+      });
       setStatus('Requesting microphone and camera...');
 
       const stream = await startLocalMedia();
@@ -881,6 +1016,8 @@ function App() {
   async function rejectCall() {
     if (incomingCall) {
       await sendSignal(incomingCall.from, { type: 'reject' }).catch(() => undefined);
+      const existing = callLogsRef.current.get(incomingCall.callId);
+      if (existing) upsertCallLog({ ...existing, status: 'declined', updatedAt: Date.now() });
     }
     resetCall('Call declined');
   }
@@ -889,6 +1026,8 @@ function App() {
     const target = peerPubkeyRef.current;
     if (target && callIdRef.current) {
       await sendSignal(target, { type: 'hangup' }).catch(() => undefined);
+      const existing = callLogsRef.current.get(callIdRef.current);
+      if (existing) upsertCallLog({ ...existing, status: 'ended', updatedAt: Date.now() });
     }
     resetCall('Call ended');
   }
@@ -1036,32 +1175,34 @@ function App() {
             <MessageCircle size={22} />
             <h1>IM Mini App</h1>
           </div>
-          <div className={error ? 'app-status-chip app-status-error' : 'app-status-chip'}>
-            {error || status}
-          </div>
-          <div className="top-actions">
+          <div className="top-menu">
             <button
               type="button"
               className="appbar-button"
-              onClick={() => setShowMyQr(true)}
-              title="Show my QR code"
+              title="More"
+              onClick={() => setMenuOpen((current) => !current)}
             >
-              <QrCode size={20} />
-            </button>
-            <button
-              type="button"
-              className="appbar-button"
-              onClick={toggleTheme}
-              title="Toggle theme"
-            >
-              {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
-            </button>
-            <button type="button" className="appbar-button" title="Search">
-              <Search size={20} />
-            </button>
-            <button type="button" className="appbar-button" title="More">
               <MoreVertical size={20} />
             </button>
+            {menuOpen && (
+              <div className="menu-popover">
+                <div className={error ? 'menu-status menu-status-error' : 'menu-status'}>
+                  {error || status}
+                </div>
+                <button type="button" onClick={() => { setShowMyQr(true); setMenuOpen(false); }}>
+                  <QrCode size={18} />
+                  <span>My QR code</span>
+                </button>
+                <button type="button" onClick={() => { setAddingContact(true); setMenuOpen(false); }}>
+                  <Plus size={18} />
+                  <span>Add contact</span>
+                </button>
+                <button type="button" onClick={() => { toggleTheme(); setMenuOpen(false); }}>
+                  {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+                  <span>{theme === 'dark' ? 'Light theme' : 'Dark theme'}</span>
+                </button>
+              </div>
+            )}
           </div>
         </header>
 
@@ -1069,10 +1210,10 @@ function App() {
           <div>
             <p className="eyebrow">
               {activeTab === 'calls'
-                ? 'Recent calls'
+                ? 'Latest first'
                 : activeTab === 'contacts'
-                  ? 'Saved npubs'
-                  : 'Nostr DMs'}
+                  ? 'Nostr settings'
+                  : 'Latest DMs'}
             </p>
             <h2>{activeTab === 'calls' ? 'Calls' : activeTab === 'contacts' ? 'Contacts' : 'Chats'}</h2>
           </div>
@@ -1139,10 +1280,20 @@ function App() {
                 <div className="contact-main">
                   <div className="contact-line">
                     <strong>{contactName}</strong>
-                    <time>{lastMessageTimeLabel(messages, contact.pubkey)}</time>
+                    <time>
+                      {activeTab === 'calls'
+                        ? lastCallTimeLabel(callLogs, contact.pubkey)
+                        : lastMessageTimeLabel(messages, contact.pubkey)}
+                    </time>
                   </div>
                   <div className="contact-line contact-preview">
-                    <span>{lastMessagePreview(messages, contact.pubkey) || contact.npub}</span>
+                    <span>
+                      {activeTab === 'calls'
+                        ? lastCallPreview(callLogs, contact.pubkey)
+                        : activeTab === 'contacts'
+                          ? `${contact.source === 'nostr' ? 'Synced from' : 'Saved to'} kind 30078 · ${contact.npub}`
+                          : lastMessagePreview(messages, contact.pubkey) || contact.npub}
+                    </span>
                     {activeTab === 'calls' ? <Phone size={16} /> : null}
                   </div>
                 </div>
@@ -1154,12 +1305,10 @@ function App() {
 
         <footer className="sync-bar">
           <span>{syncStatus}</span>
-          <button type="button" className="text-button" onClick={syncContactsToNostr}>
-            Sync
-          </button>
+          <span>kind 30078</span>
         </footer>
 
-        <button type="button" className="floating-compose" onClick={() => setAddingContact(true)}>
+        <button type="button" className="floating-compose" onClick={() => setContactPickerOpen(true)}>
           <MessageCircle size={25} />
         </button>
 
@@ -1276,9 +1425,18 @@ function App() {
 
             <footer className="composer">
               <div className="composer-field">
-                <button type="button" title="Emoji">
+                <button type="button" title="Emoji" onClick={() => setEmojiOpen((current) => !current)}>
                   <Smile size={20} />
                 </button>
+                {emojiOpen && (
+                  <div className="emoji-tray">
+                    {QUICK_EMOJIS.map((emoji) => (
+                      <button key={emoji} type="button" onClick={() => insertEmoji(emoji)}>
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                )}
               <textarea
                 value={composerText}
                 onChange={(event) => setComposerText(event.target.value)}
@@ -1512,6 +1670,58 @@ function App() {
         </section>
       )}
 
+      {contactPickerOpen && (
+        <section className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="contact-modal contact-picker">
+            <header>
+              <div>
+                <p className="eyebrow">Start chat</p>
+                <h2>Saved contacts</h2>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setContactPickerOpen(false)}
+                title="Close"
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="picker-list">
+              {contacts.length === 0 ? (
+                <div className="thread-empty">
+                  <ContactRound size={28} />
+                  <strong>No saved contacts</strong>
+                  <span>Add a contact first to start a DM.</span>
+                </div>
+              ) : (
+                contacts.map((contact) => {
+                  const contactProfile = profilesByPubkey[contact.pubkey] ?? null;
+                  const contactName = displayNameForContact(contact);
+                  return (
+                    <button
+                      key={contact.pubkey}
+                      type="button"
+                      className="picker-contact"
+                      onClick={() => startChatWith(contact.pubkey)}
+                    >
+                      {renderAvatar(contactName, contactProfile)}
+                      <span>{contactName}</span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+            <footer>
+              <button type="button" className="secondary-button" onClick={() => setAddingContact(true)}>
+                <Plus size={18} />
+                <span>Add contact</span>
+              </button>
+            </footer>
+          </div>
+        </section>
+      )}
+
       {error && (
         <button
           type="button"
@@ -1593,8 +1803,29 @@ function profilePicture(profile: UserProfile | null): string {
   return typeof image === 'string' ? image : '';
 }
 
+function profileSearchText(profile: UserProfile | null): string {
+  const metadata = profile?.metadata;
+  if (!metadata) return '';
+  return [
+    metadata.name,
+    metadata.display_name,
+    metadata.username,
+    metadata.nip05,
+    metadata.about,
+    metadata.lud16,
+    metadata.website,
+  ]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
+}
+
 function contactsStorageKey(pubkey: string): string {
   return `${CONTACTS_STORAGE_PREFIX}.${pubkey}`;
+}
+
+function callsStorageKey(pubkey: string): string {
+  return `${CALLS_STORAGE_PREFIX}.${pubkey}`;
 }
 
 function readStoredContacts(pubkey: string): Contact[] {
@@ -1602,6 +1833,44 @@ function readStoredContacts(pubkey: string): Contact[] {
     const raw = window.localStorage.getItem(contactsStorageKey(pubkey));
     if (!raw) return [];
     return parseContactsBackup(JSON.stringify({ version: 1, contacts: JSON.parse(raw) }));
+  } catch {
+    return [];
+  }
+}
+
+function readStoredCalls(pubkey: string): CallLog[] {
+  try {
+    const raw = window.localStorage.getItem(callsStorageKey(pubkey));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const record = item as Partial<CallLog>;
+      if (typeof record.callId !== 'string' || typeof record.peerPubkey !== 'string') return [];
+      const peerPubkey = normalizeRecipient(record.peerPubkey);
+      const createdAt = typeof record.createdAt === 'number' ? record.createdAt : Date.now();
+      const updatedAt = typeof record.updatedAt === 'number' ? record.updatedAt : createdAt;
+      const direction: CallLog['direction'] =
+        record.direction === 'incoming' ? 'incoming' : 'outgoing';
+      return [
+        {
+          callId: record.callId,
+          peerPubkey,
+          direction,
+          media: record.media ?? { audio: true, video: true },
+          status:
+            record.status === 'answered' ||
+            record.status === 'declined' ||
+            record.status === 'ended' ||
+            record.status === 'missed'
+              ? record.status
+              : 'ended',
+          createdAt,
+          updatedAt,
+        },
+      ];
+    }).sort((a, b) => b.updatedAt - a.updatedAt);
   } catch {
     return [];
   }
@@ -1678,6 +1947,49 @@ function lastMessageTimeLabel(messages: ChatMessage[], pubkey: string): string {
   const date = new Date(latest.createdAt);
   const now = new Date();
   if (date.toDateString() === now.toDateString()) return formatMessageTime(latest.createdAt);
+
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+  }).format(date);
+}
+
+function latestCalls(callLogs: CallLog[]): CallLog[] {
+  const byPeer = new Map<string, CallLog>();
+  callLogs.forEach((call) => {
+    const existing = byPeer.get(call.peerPubkey);
+    if (!existing || call.updatedAt > existing.updatedAt) byPeer.set(call.peerPubkey, call);
+  });
+  return Array.from(byPeer.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function latestCallForPeer(callLogs: CallLog[], pubkey: string): CallLog | null {
+  return callLogs
+    .filter((call) => call.peerPubkey === pubkey)
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? null;
+}
+
+function lastCallPreview(callLogs: CallLog[], pubkey: string): string {
+  const latest = latestCallForPeer(callLogs, pubkey);
+  if (!latest) return 'No calls yet';
+  const direction = latest.direction === 'incoming' ? 'Incoming' : 'Outgoing';
+  const media = latest.media.video ? 'video' : 'voice';
+  return `${direction} ${media} call · ${latest.status}`;
+}
+
+function lastCallTimeLabel(callLogs: CallLog[], pubkey: string): string {
+  const latest = latestCallForPeer(callLogs, pubkey);
+  return latest ? formatRelativeTime(latest.updatedAt) : '';
+}
+
+function formatRelativeTime(time: number): string {
+  const date = new Date(time);
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) return formatMessageTime(time);
 
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
