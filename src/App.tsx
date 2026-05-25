@@ -1,25 +1,36 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DirectMessage, UserProfile } from '@apna/sdk';
 import * as nip19 from 'nostr-tools/nip19';
 import {
+  Check,
+  Keyboard,
+  MessageCircle,
   Mic,
   MicOff,
   Phone,
   PhoneCall,
   PhoneOff,
+  Plus,
+  QrCode,
   RefreshCw,
+  Search,
+  Send,
+  Trash2,
   UserRound,
   Video,
   VideoOff,
+  X,
 } from 'lucide-react';
 
 import { useApna } from './apna-provider';
 
 const SIGNAL_KIND = 'im.call.signal';
 const SIGNAL_VERSION = 1;
+const SETTINGS_D_TAG = 'im-mini-app.contacts.v1';
 const DEFAULT_STUN_URL = 'stun:stun.l.google.com:19302';
+const CONTACTS_STORAGE_PREFIX = 'im-mini-app.contacts.v1';
 
 type CallSignalType =
   | 'invite'
@@ -56,19 +67,51 @@ interface IncomingCall {
   };
 }
 
+interface Contact {
+  pubkey: string;
+  npub: string;
+  label: string;
+  addedAt: number;
+  source: 'manual' | 'qr' | 'dm' | 'nostr';
+}
+
+interface ChatMessage {
+  id: string;
+  peerPubkey: string;
+  fromPubkey: string;
+  content: string;
+  createdAt: number;
+  outgoing: boolean;
+  pending?: boolean;
+}
+
+interface BarcodeDetectorShape {
+  detect(source: CanvasImageSource): Promise<Array<{ rawValue: string }>>;
+}
+
+type BarcodeDetectorCtor = new (options?: { formats?: string[] }) => BarcodeDetectorShape;
 type CallState = 'idle' | 'ready' | 'calling' | 'ringing' | 'connecting' | 'connected';
 
 function App() {
   const { apna } = useApna();
   const [selfPubkey, setSelfPubkey] = useState('');
   const [selfProfile, setSelfProfile] = useState<UserProfile | null>(null);
-  const [peerInput, setPeerInput] = useState('');
-  const [peerPubkey, setPeerPubkey] = useState('');
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [selectedPubkey, setSelectedPubkey] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [contactDraftName, setContactDraftName] = useState('');
+  const [contactDraftKey, setContactDraftKey] = useState('');
+  const [addingContact, setAddingContact] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scannerStatus, setScannerStatus] = useState('');
+  const [composerText, setComposerText] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [callId, setCallId] = useState('');
   const [callState, setCallState] = useState<CallState>('idle');
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [status, setStatus] = useState('Connecting to Apna capabilities...');
   const [error, setError] = useState('');
+  const [syncStatus, setSyncStatus] = useState('Contacts are local');
   const [videoEnabled, setVideoEnabled] = useState(true);
   const [micMuted, setMicMuted] = useState(false);
   const [cameraMuted, setCameraMuted] = useState(false);
@@ -77,9 +120,11 @@ function App() {
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const scannerVideoRef = useRef<HTMLVideoElement | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+  const scannerStreamRef = useRef<MediaStream | null>(null);
   const pendingOfferRef = useRef<CallSignal | null>(null);
   const queuedCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const unsubscribeMessagesRef = useRef<(() => void) | null>(null);
@@ -87,9 +132,104 @@ function App() {
   const peerPubkeyRef = useRef('');
   const callIdRef = useRef('');
   const videoEnabledRef = useRef(true);
+  const messagesRef = useRef(new Map<string, ChatMessage>());
+
+  const selectedContact = useMemo(
+    () => contacts.find((contact) => contact.pubkey === selectedPubkey) ?? null,
+    [contacts, selectedPubkey]
+  );
+
+  const visibleContacts = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return contacts;
+    return contacts.filter((contact) => {
+      return (
+        contact.label.toLowerCase().includes(query) ||
+        contact.npub.toLowerCase().includes(query) ||
+        contact.pubkey.includes(query)
+      );
+    });
+  }, [contacts, searchQuery]);
+
+  const activeMessages = useMemo(
+    () => messages.filter((message) => message.peerPubkey === selectedPubkey),
+    [messages, selectedPubkey]
+  );
+
+  const saveContacts = useCallback(
+    (nextContacts: Contact[]) => {
+      const sorted = sortContacts(nextContacts, messagesRef.current);
+      setContacts(sorted);
+      if (selfPubkeyRef.current) {
+        window.localStorage.setItem(
+          contactsStorageKey(selfPubkeyRef.current),
+          JSON.stringify(sorted)
+        );
+      }
+    },
+    []
+  );
+
+  const upsertContact = useCallback(
+    (pubkey: string, label?: string, source: Contact['source'] = 'dm') => {
+      const normalized = normalizeRecipient(pubkey);
+      setContacts((current) => {
+        const existing = current.find((contact) => contact.pubkey === normalized);
+        const next = existing
+          ? current.map((contact) =>
+              contact.pubkey === normalized
+                ? {
+                    ...contact,
+                    label: label?.trim() || contact.label,
+                    source: contact.source === 'dm' ? source : contact.source,
+                  }
+                : contact
+            )
+          : [
+              ...current,
+              {
+                pubkey: normalized,
+                npub: nip19.npubEncode(normalized),
+                label: label?.trim() || shortPubkey(normalized),
+                addedAt: Date.now(),
+                source,
+              },
+            ];
+        const sorted = sortContacts(next, messagesRef.current);
+        if (selfPubkeyRef.current) {
+          window.localStorage.setItem(
+            contactsStorageKey(selfPubkeyRef.current),
+            JSON.stringify(sorted)
+          );
+        }
+        return sorted;
+      });
+      return normalized;
+    },
+    []
+  );
+
+  const addChatMessage = useCallback(
+    (message: ChatMessage) => {
+      const existing = messagesRef.current.get(message.id);
+      messagesRef.current.set(message.id, existing ? { ...existing, ...message } : message);
+      const nextMessages = Array.from(messagesRef.current.values()).sort(
+        (a, b) => a.createdAt - b.createdAt
+      );
+      setMessages(nextMessages);
+      upsertContact(message.peerPubkey, undefined, 'dm');
+    },
+    [upsertContact]
+  );
 
   const sendSignal = useCallback(
-    async (targetPubkey: string, partial: Omit<CallSignal, 'kind' | 'version' | 'from' | 'to' | 'createdAt' | 'callId'>) => {
+    async (
+      targetPubkey: string,
+      partial: Omit<
+        CallSignal,
+        'kind' | 'version' | 'from' | 'to' | 'createdAt' | 'callId'
+      >
+    ) => {
       const activeSelf = selfPubkeyRef.current;
       const activeCallId = callIdRef.current;
       if (!activeSelf || !activeCallId) return;
@@ -143,7 +283,7 @@ function App() {
           setCallState('connected');
           setStatus('Connected');
         } else if (pc.connectionState === 'failed') {
-          setStatus('Connection failed. You can hang up and retry.');
+          setStatus('Connection failed. Hang up and retry.');
         } else if (pc.connectionState === 'disconnected') {
           setStatus('Peer disconnected');
         }
@@ -172,7 +312,6 @@ function App() {
       callIdRef.current = '';
       stopLocalMedia();
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
-      setPeerPubkey('');
       setCallId('');
       setIncomingCall(null);
       setHasRemoteMedia(false);
@@ -263,8 +402,7 @@ function App() {
       if (signal.type === 'invite') {
         peerPubkeyRef.current = signal.from;
         callIdRef.current = signal.callId;
-        setPeerPubkey(signal.from);
-        setPeerInput(signal.from);
+        setSelectedPubkey(signal.from);
         setCallId(signal.callId);
         setIncomingCall({
           callId: signal.callId,
@@ -272,6 +410,7 @@ function App() {
           createdAt: signal.createdAt,
           media: signal.media ?? { audio: true, video: true },
         });
+        upsertContact(signal.from, undefined, 'dm');
         setCallState('ringing');
         setStatus('Incoming call');
         return;
@@ -325,17 +464,32 @@ function App() {
         resetCall('Call ended');
       }
     },
-    [answerOffer, applyRemoteCandidate, flushQueuedCandidates, resetCall]
+    [answerOffer, applyRemoteCandidate, flushQueuedCandidates, resetCall, upsertContact]
   );
 
   const handleDirectMessage = useCallback(
     (message: DirectMessage) => {
       const text = message.plaintext;
       if (!text) return;
+
       const signal = parseSignal(text);
-      if (signal) handleSignal(signal);
+      if (signal) {
+        handleSignal(signal);
+        return;
+      }
+
+      const peerPubkey = inferMessagePeer(message, selfPubkeyRef.current);
+      if (!peerPubkey) return;
+      addChatMessage({
+        id: message.id,
+        peerPubkey,
+        fromPubkey: message.outgoing ? selfPubkeyRef.current : message.pubkey,
+        content: text,
+        createdAt: message.created_at * 1000,
+        outgoing: Boolean(message.outgoing),
+      });
     },
-    [handleSignal]
+    [addChatMessage, handleSignal]
   );
 
   useEffect(() => {
@@ -360,23 +514,32 @@ function App() {
         setSelfPubkey(pubkey);
         setSelfProfile(profile);
 
+        const localContacts = readStoredContacts(pubkey);
+        setContacts(localContacts);
+        setSelectedPubkey((current) => current || localContacts[0]?.pubkey || '');
+
+        void loadContactsFromNostr().catch(() => undefined);
+
         const params = new URLSearchParams(window.location.search);
         const peer = params.get('peer');
         const routeCallId = params.get('callId');
-        if (peer) setPeerInput(peer);
+        if (peer) {
+          const normalizedPeer = upsertContact(peer, undefined, 'dm');
+          setSelectedPubkey(normalizedPeer);
+        }
         if (routeCallId) {
           callIdRef.current = routeCallId;
           setCallId(routeCallId);
           setStatus('Looking for pending call invite...');
         }
 
-        const since = Math.floor(Date.now() / 1000) - 60 * 60;
+        const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14;
         const stop = apna.social.v1.subscribeMessages({ since }, handleDirectMessage);
         unsubscribeMessagesRef.current = stop;
 
-        const messages = await apna.social.v1.messages({ since, limit: 100 }).catch(() => []);
+        const inbox = await apna.social.v1.messages({ since, limit: 300 }).catch(() => []);
         if (disposed) return;
-        messages.forEach(handleDirectMessage);
+        inbox.forEach(handleDirectMessage);
         setCallState((current) => (current === 'idle' ? 'ready' : current));
         if (!routeCallId) setStatus('Ready');
       } catch (err) {
@@ -393,22 +556,143 @@ function App() {
       disposed = true;
       unsubscribeMessagesRef.current?.();
       resetCall('Disconnected');
+      stopScanner();
     };
-  }, [apna, handleDirectMessage, resetCall]);
+  }, [apna, handleDirectMessage, resetCall, upsertContact]);
 
-  async function dial() {
+  async function loadContactsFromNostr() {
+    try {
+      await apna.permissions.request([
+        'nostr.query',
+        'nostr.publish',
+        'nostr.nip04.encrypt',
+        'nostr.nip04.decrypt',
+      ]);
+
+      const events = await apna.nostr.query({
+        kinds: [30078],
+        authors: [selfPubkeyRef.current],
+        '#d': [SETTINGS_D_TAG],
+        limit: 1,
+      });
+      const latest = events.sort((a, b) => b.created_at - a.created_at)[0];
+      if (!latest?.content) {
+        setSyncStatus('Contacts can sync to Nostr');
+        return;
+      }
+
+      const decrypted = await apna.nostr.nip04.decrypt(selfPubkeyRef.current, latest.content);
+      const remoteContacts = parseContactsBackup(decrypted);
+      if (remoteContacts.length === 0) {
+        setSyncStatus('Contacts can sync to Nostr');
+        return;
+      }
+
+      const merged = mergeContacts(readStoredContacts(selfPubkeyRef.current), remoteContacts);
+      saveContacts(merged);
+      setSelectedPubkey((current) => current || merged[0]?.pubkey || '');
+      setSyncStatus('Contacts restored from Nostr');
+    } catch {
+      setSyncStatus('Local contacts only');
+    }
+  }
+
+  async function syncContactsToNostr() {
+    setError('');
+    try {
+      await apna.permissions.request([
+        'nostr.publish',
+        'nostr.nip04.encrypt',
+      ]);
+      const content = JSON.stringify({ version: 1, contacts });
+      const encrypted = await apna.nostr.nip04.encrypt(selfPubkeyRef.current, content);
+      await apna.nostr.publish({
+        kind: 30078,
+        content: encrypted,
+        tags: [['d', SETTINGS_D_TAG]],
+      });
+      setSyncStatus('Contacts synced to Nostr');
+    } catch (err) {
+      setSyncStatus('Nostr sync unavailable');
+      setError((err as Error).message);
+    }
+  }
+
+  async function addContactFromDraft(source: Contact['source'] = 'manual') {
+    setError('');
+    try {
+      const normalized = upsertContact(contactDraftKey, contactDraftName, source);
+      setSelectedPubkey(normalized);
+      setContactDraftKey('');
+      setContactDraftName('');
+      setAddingContact(false);
+      setScannerOpen(false);
+      stopScanner();
+      setStatus('Contact saved');
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  function removeContact(pubkey: string) {
+    const next = contacts.filter((contact) => contact.pubkey !== pubkey);
+    saveContacts(next);
+    if (selectedPubkey === pubkey) setSelectedPubkey(next[0]?.pubkey || '');
+  }
+
+  async function sendMessage() {
+    const text = composerText.trim();
+    if (!text || !selectedPubkey) return;
+
+    setError('');
+    setComposerText('');
+    const tempId = `local-${Date.now()}`;
+    addChatMessage({
+      id: tempId,
+      peerPubkey: selectedPubkey,
+      fromPubkey: selfPubkeyRef.current,
+      content: text,
+      createdAt: Date.now(),
+      outgoing: true,
+      pending: true,
+    });
+
+    try {
+      const sent = await apna.social.v1.sendDirectMessage(selectedPubkey, text);
+      messagesRef.current.delete(tempId);
+      addChatMessage({
+        id: sent.id || tempId,
+        peerPubkey: selectedPubkey,
+        fromPubkey: selfPubkeyRef.current,
+        content: sent.plaintext || text,
+        createdAt: (sent.created_at || Math.floor(Date.now() / 1000)) * 1000,
+        outgoing: true,
+      });
+    } catch (err) {
+      const failed = messagesRef.current.get(tempId);
+      if (failed) {
+        messagesRef.current.set(tempId, { ...failed, pending: false });
+        setMessages(Array.from(messagesRef.current.values()).sort((a, b) => a.createdAt - b.createdAt));
+      }
+      setError((err as Error).message);
+    }
+  }
+
+  async function startCall(targetPubkey: string, withVideo: boolean) {
     setError('');
     setWakeStatus('');
     try {
-      const target = normalizeRecipient(peerInput);
+      const target = normalizeRecipient(targetPubkey);
+      videoEnabledRef.current = withVideo;
+      setVideoEnabled(withVideo);
       const nextCallId = crypto.randomUUID();
       peerPubkeyRef.current = target;
       callIdRef.current = nextCallId;
-      setPeerPubkey(target);
+      setSelectedPubkey(target);
       setCallId(nextCallId);
       setIncomingCall(null);
       setCallState('calling');
-      setStatus('Requesting microphone and camera...');
+      setStatus(withVideo ? 'Requesting camera and microphone...' : 'Requesting microphone...');
 
       const stream = await startLocalMedia();
       const pc = createPeerConnection(target);
@@ -416,7 +700,7 @@ function App() {
 
       await sendSignal(target, {
         type: 'invite',
-        media: { audio: true, video: videoEnabled },
+        media: { audio: true, video: withVideo },
       });
       void wakeCounterparty(target, nextCallId);
 
@@ -424,7 +708,7 @@ function App() {
       await pc.setLocalDescription(offer);
       await sendSignal(target, {
         type: 'offer',
-        media: { audio: true, video: videoEnabled },
+        media: { audio: true, video: withVideo },
         sdp: offer.sdp ?? '',
       });
       setStatus('Calling...');
@@ -439,9 +723,11 @@ function App() {
     setError('');
     try {
       const target = incomingCall.from;
+      videoEnabledRef.current = incomingCall.media.video;
+      setVideoEnabled(incomingCall.media.video);
       peerPubkeyRef.current = target;
       callIdRef.current = incomingCall.callId;
-      setPeerPubkey(target);
+      setSelectedPubkey(target);
       setCallId(incomingCall.callId);
       setCallState('connecting');
       setStatus('Requesting microphone and camera...');
@@ -496,28 +782,18 @@ function App() {
     setCameraMuted(nextMuted);
   }
 
-  function handleVideoMode(enabled: boolean) {
-    videoEnabledRef.current = enabled;
-    setVideoEnabled(enabled);
-  }
-
   async function wakeCounterparty(targetPubkey: string, activeCallId: string) {
-    const wakeApiUrl =
-      process.env.NEXT_PUBLIC_WAKE_API_URL || '/api/calls/wake';
-    if (!wakeApiUrl) {
-      setWakeStatus('Wake backend not configured; foreground signaling still works.');
-      return;
-    }
-
-    const appUrl =
-      process.env.NEXT_PUBLIC_APP_URL || window.location.origin;
-    const hostOrigin =
-      process.env.NEXT_PUBLIC_HOST_APP_ORIGIN || window.location.origin;
+    const wakeApiUrl = process.env.NEXT_PUBLIC_WAKE_API_URL || '/api/calls/wake';
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin;
+    const hostOrigin = process.env.NEXT_PUBLIC_HOST_APP_ORIGIN || window.location.origin;
     const callerName = profileName(selfProfile) || shortPubkey(selfPubkeyRef.current);
-    const miniAppUrl = `${appUrl}?callId=${encodeURIComponent(activeCallId)}&peer=${encodeURIComponent(
-      selfPubkeyRef.current
-    )}`;
-    const deepLink = `${hostOrigin.replace(/\/+$/, '')}/app?appId=im-mini-app&appUrl=${encodeURIComponent(
+    const miniAppUrl = `${appUrl}?callId=${encodeURIComponent(
+      activeCallId
+    )}&peer=${encodeURIComponent(selfPubkeyRef.current)}`;
+    const deepLink = `${hostOrigin.replace(
+      /\/+$/,
+      ''
+    )}/app?appId=im-mini-app&appUrl=${encodeURIComponent(
       miniAppUrl
     )}&defaultDisplay=fullscreen`;
 
@@ -546,112 +822,390 @@ function App() {
     }
   }
 
-  const canDial = callState === 'ready' && peerInput.trim().length > 0;
-  const inCall = callState === 'calling' || callState === 'connecting' || callState === 'connected';
+  async function startScanner() {
+    setError('');
+    setScannerStatus('');
+    const Detector = getBarcodeDetector();
+    if (!Detector) {
+      setScannerStatus('QR scanning is not available in this browser. Paste the npub instead.');
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setScannerStatus('Camera access is not available in this browser.');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false,
+      });
+      scannerStreamRef.current = stream;
+      if (scannerVideoRef.current) {
+        scannerVideoRef.current.srcObject = stream;
+        await scannerVideoRef.current.play();
+      }
+
+      const detector = new Detector({ formats: ['qr_code'] });
+      let active = true;
+      const scan = async () => {
+        if (!active || !scannerOpen) return;
+        const video = scannerVideoRef.current;
+        if (video && video.readyState >= 2) {
+          const results = await detector.detect(video).catch(() => []);
+          const value = results[0]?.rawValue;
+          if (value) {
+            const extracted = extractNpubOrPubkey(value);
+            if (extracted) {
+              setContactDraftKey(extracted);
+              setScannerStatus('QR detected. Save the contact to keep it.');
+              active = false;
+              stopScanner();
+              return;
+            }
+          }
+        }
+        window.setTimeout(scan, 350);
+      };
+      void scan();
+      setScannerStatus('Point the camera at an npub QR code.');
+    } catch (err) {
+      setScannerStatus((err as Error).message);
+    }
+  }
+
+  function stopScanner() {
+    scannerStreamRef.current?.getTracks().forEach((track) => track.stop());
+    scannerStreamRef.current = null;
+    if (scannerVideoRef.current) scannerVideoRef.current.srcObject = null;
+  }
+
+  useEffect(() => {
+    if (!scannerOpen) {
+      stopScanner();
+      return;
+    }
+    void startScanner();
+    return stopScanner;
+    // scannerOpen intentionally controls the camera lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scannerOpen]);
+
+  const inCall =
+    callState === 'calling' || callState === 'connecting' || callState === 'connected';
+  const selectedTitle = selectedContact?.label || shortPubkey(selectedPubkey);
 
   return (
-    <main className="shell">
-      <section className="topbar">
-        <div>
-          <p className="eyebrow">Apna mini-app</p>
-          <h1>IM Calls</h1>
-        </div>
-        <div className="identity-pill" title={selfPubkey || 'Connecting'}>
-          <UserRound size={16} />
-          <span>{profileName(selfProfile) || shortPubkey(selfPubkey) || 'Connecting'}</span>
-        </div>
-      </section>
-
-      <section className="stage" aria-label="Call video stage">
-        <div className={hasRemoteMedia ? 'remote-pane has-remote-media' : 'remote-pane'}>
-          <video ref={remoteVideoRef} autoPlay playsInline className="video" />
-          <div className="remote-placeholder">
-            <PhoneCall size={32} />
-            <span>{remoteLabel(callState, peerPubkey, incomingCall)}</span>
-          </div>
-        </div>
-        <div className="local-preview">
-          <video ref={localVideoRef} autoPlay playsInline muted className="video" />
-          <span>{cameraMuted ? 'Camera off' : 'You'}</span>
-        </div>
-      </section>
-
-      <section className="controls-band">
-        <div className="dial-panel">
-          <label htmlFor="peer">Call recipient</label>
-          <div className="dial-row">
-            <input
-              id="peer"
-              value={peerInput}
-              onChange={(event) => setPeerInput(event.target.value)}
-              placeholder="npub... or 64-char pubkey"
-              disabled={callState !== 'ready'}
-            />
-            <button type="button" className="primary-button" onClick={dial} disabled={!canDial}>
-              <Phone size={18} />
-              <span>Dial</span>
-            </button>
-          </div>
-          <p className="fine-print">Signaling is encrypted through Apna social DMs. Media stays peer-to-peer.</p>
-        </div>
-
-        <div className="media-actions" aria-label="Call controls">
-          <button type="button" onClick={toggleMic} disabled={!inCall} title="Toggle microphone">
-            {micMuted ? <MicOff size={20} /> : <Mic size={20} />}
-          </button>
-          <button type="button" onClick={toggleCamera} disabled={!inCall || !videoEnabled} title="Toggle camera">
-            {cameraMuted ? <VideoOff size={20} /> : <Video size={20} />}
-          </button>
-          <button type="button" onClick={() => handleVideoMode(!videoEnabled)} disabled={callState !== 'ready'} title="Video mode">
-            {videoEnabled ? <Video size={20} /> : <VideoOff size={20} />}
-          </button>
-          <button type="button" className="danger-button" onClick={hangUp} disabled={!inCall} title="Hang up">
-            <PhoneOff size={20} />
-          </button>
-        </div>
-      </section>
-
-      {incomingCall && callState === 'ringing' && (
-        <section className="incoming-strip">
+    <main className="shell chat-shell">
+      <aside className="sidebar" aria-label="Contacts">
+        <header className="sidebar-header">
           <div>
-            <p className="eyebrow">Incoming call</p>
-            <h2>{shortPubkey(incomingCall.from)}</h2>
+            <p className="eyebrow">Apna IM</p>
+            <h1>Chats</h1>
           </div>
-          <div className="incoming-actions">
-            <button type="button" className="secondary-button" onClick={rejectCall}>
-              <PhoneOff size={18} />
-              <span>Decline</span>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => setAddingContact(true)}
+            title="Add contact"
+          >
+            <Plus size={19} />
+          </button>
+        </header>
+
+        <div className="identity-row" title={selfPubkey || 'Connecting'}>
+          <div className="avatar self-avatar">
+            <UserRound size={18} />
+          </div>
+          <div>
+            <strong>{profileName(selfProfile) || 'You'}</strong>
+            <span>{shortPubkey(selfPubkey) || 'Connecting'}</span>
+          </div>
+        </div>
+
+        <div className="search-row">
+          <Search size={16} />
+          <input
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search contacts"
+          />
+        </div>
+
+        <div className="contact-list">
+          {visibleContacts.length === 0 ? (
+            <div className="empty-state">
+              <MessageCircle size={28} />
+              <strong>No contacts yet</strong>
+              <span>Add an npub manually or scan a QR code.</span>
+            </div>
+          ) : (
+            visibleContacts.map((contact) => (
+              <button
+                key={contact.pubkey}
+                type="button"
+                className={
+                  contact.pubkey === selectedPubkey
+                    ? 'contact-row contact-row-active'
+                    : 'contact-row'
+                }
+                onClick={() => setSelectedPubkey(contact.pubkey)}
+              >
+                <div className="avatar">{initials(contact.label)}</div>
+                <div className="contact-main">
+                  <strong>{contact.label}</strong>
+                  <span>{lastMessagePreview(messages, contact.pubkey) || contact.npub}</span>
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+
+        <footer className="sync-bar">
+          <span>{syncStatus}</span>
+          <button type="button" className="text-button" onClick={syncContactsToNostr}>
+            Sync
+          </button>
+        </footer>
+      </aside>
+
+      <section className="conversation" aria-label="Conversation">
+        {selectedPubkey ? (
+          <>
+            <header className="conversation-header">
+              <div className="peer-summary">
+                <div className="avatar">{initials(selectedTitle)}</div>
+                <div>
+                  <h2>{selectedTitle}</h2>
+                  <span>{shortPubkey(selectedPubkey)}</span>
+                </div>
+              </div>
+              <div className="header-actions">
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => void startCall(selectedPubkey, false)}
+                  disabled={callState !== 'ready'}
+                  title="Start voice call"
+                >
+                  <Phone size={19} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => void startCall(selectedPubkey, true)}
+                  disabled={callState !== 'ready'}
+                  title="Start video call"
+                >
+                  <Video size={19} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-button danger-icon"
+                  onClick={() => removeContact(selectedPubkey)}
+                  title="Remove contact"
+                >
+                  <Trash2 size={18} />
+                </button>
+              </div>
+            </header>
+
+            <div className="messages-pane">
+              {activeMessages.length === 0 ? (
+                <div className="thread-empty">
+                  <MessageCircle size={34} />
+                  <strong>Start a private Nostr DM</strong>
+                  <span>Messages use the host social DM capability.</span>
+                </div>
+              ) : (
+                activeMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={message.outgoing ? 'bubble bubble-out' : 'bubble bubble-in'}
+                  >
+                    <p>{message.content}</p>
+                    <span>
+                      {formatMessageTime(message.createdAt)}
+                      {message.pending ? ' · sending' : ''}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <footer className="composer">
+              <textarea
+                value={composerText}
+                onChange={(event) => setComposerText(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    void sendMessage();
+                  }
+                }}
+                placeholder="Message"
+                rows={1}
+              />
+              <button
+                type="button"
+                className="send-button"
+                onClick={() => void sendMessage()}
+                disabled={!composerText.trim()}
+                title="Send message"
+              >
+                <Send size={18} />
+              </button>
+            </footer>
+          </>
+        ) : (
+          <div className="select-empty">
+            <MessageCircle size={42} />
+            <h2>Select a chat</h2>
+            <p>Add a contact by npub or QR code to start messaging and calling.</p>
+            <button type="button" className="primary-button" onClick={() => setAddingContact(true)}>
+              <Plus size={18} />
+              <span>Add contact</span>
             </button>
-            <button type="button" className="primary-button" onClick={acceptCall}>
-              <PhoneCall size={18} />
-              <span>Accept</span>
-            </button>
+          </div>
+        )}
+      </section>
+
+      {(inCall || callState === 'ringing') && (
+        <section className="call-panel" aria-label="Active call">
+          <div className="call-stage">
+            <div className={hasRemoteMedia ? 'remote-pane has-remote-media' : 'remote-pane'}>
+              <video ref={remoteVideoRef} autoPlay playsInline className="video" />
+              <div className="remote-placeholder">
+                <PhoneCall size={30} />
+                <span>{remoteLabel(callState, peerPubkeyRef.current || selectedPubkey, incomingCall)}</span>
+              </div>
+            </div>
+            <div className="local-preview">
+              <video ref={localVideoRef} autoPlay playsInline muted className="video" />
+              <span>{cameraMuted ? 'Camera off' : 'You'}</span>
+            </div>
+          </div>
+          <div className="call-footer">
+            <div>
+              <strong>{callState}</strong>
+              <span>{callId ? `${callId.slice(0, 8)} · ${wakeStatus || status}` : wakeStatus || status}</span>
+            </div>
+            {callState === 'ringing' && incomingCall ? (
+              <div className="call-actions">
+                <button type="button" className="danger-button" onClick={rejectCall}>
+                  <PhoneOff size={18} />
+                  <span>Decline</span>
+                </button>
+                <button type="button" className="primary-button" onClick={acceptCall}>
+                  <PhoneCall size={18} />
+                  <span>Accept</span>
+                </button>
+              </div>
+            ) : (
+              <div className="call-actions">
+                <button type="button" className="icon-button" onClick={toggleMic} disabled={!inCall}>
+                  {micMuted ? <MicOff size={19} /> : <Mic size={19} />}
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={toggleCamera}
+                  disabled={!inCall || !videoEnabled}
+                >
+                  {cameraMuted ? <VideoOff size={19} /> : <Video size={19} />}
+                </button>
+                <button type="button" className="danger-button" onClick={hangUp} disabled={!inCall}>
+                  <PhoneOff size={18} />
+                  <span>Hang up</span>
+                </button>
+              </div>
+            )}
           </div>
         </section>
       )}
 
-      <section className="status-grid">
-        <div className="status-item">
-          <span>State</span>
-          <strong>{callState}</strong>
-        </div>
-        <div className="status-item">
-          <span>Call ID</span>
-          <strong>{callId ? callId.slice(0, 8) : 'none'}</strong>
-        </div>
-        <div className="status-item">
-          <span>Wake</span>
-          <strong>{wakeStatus || 'idle'}</strong>
-        </div>
-        <button type="button" className="secondary-button" onClick={() => window.location.reload()}>
-          <RefreshCw size={16} />
-          <span>Reload</span>
-        </button>
-      </section>
+      {addingContact && (
+        <section className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="contact-modal">
+            <header>
+              <div>
+                <p className="eyebrow">New contact</p>
+                <h2>Add by npub</h2>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => {
+                  setAddingContact(false);
+                  setScannerOpen(false);
+                  stopScanner();
+                }}
+                title="Close"
+              >
+                <X size={18} />
+              </button>
+            </header>
+
+            <label>
+              Name
+              <input
+                value={contactDraftName}
+                onChange={(event) => setContactDraftName(event.target.value)}
+                placeholder="Satoshi"
+              />
+            </label>
+            <label>
+              npub or pubkey
+              <textarea
+                value={contactDraftKey}
+                onChange={(event) => setContactDraftKey(event.target.value)}
+                placeholder="npub1..."
+                rows={3}
+              />
+            </label>
+
+            <div className="scanner-tools">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setScannerOpen((current) => !current)}
+              >
+                <QrCode size={18} />
+                <span>{scannerOpen ? 'Stop scan' : 'Scan QR'}</span>
+              </button>
+              <button type="button" className="secondary-button" onClick={() => setContactDraftKey('')}>
+                <Keyboard size={18} />
+                <span>Clear</span>
+              </button>
+            </div>
+
+            {scannerOpen && (
+              <div className="scanner-box">
+                <video ref={scannerVideoRef} muted playsInline />
+                <span>{scannerStatus || 'Starting camera...'}</span>
+              </div>
+            )}
+
+            <footer>
+              <button type="button" className="secondary-button" onClick={() => setAddingContact(false)}>
+                <X size={18} />
+                <span>Cancel</span>
+              </button>
+              <button type="button" className="primary-button" onClick={() => void addContactFromDraft(scannerOpen ? 'qr' : 'manual')}>
+                <Check size={18} />
+                <span>Save</span>
+              </button>
+            </footer>
+          </div>
+        </section>
+      )}
 
       {(status || error) && (
         <section className={error ? 'notice error' : 'notice'}>
           {error || status}
+          <button type="button" className="icon-button" onClick={() => window.location.reload()} title="Reload">
+            <RefreshCw size={15} />
+          </button>
         </section>
       )}
     </main>
@@ -680,17 +1234,30 @@ function parseSignal(text: string): CallSignal | null {
 }
 
 function normalizeRecipient(value: string): string {
-  const trimmed = value.trim();
+  const extracted = extractNpubOrPubkey(value);
+  if (!extracted) throw new Error('Contact must be an npub or 64-character hex pubkey.');
+  const trimmed = extracted.trim();
   if (/^[0-9a-f]{64}$/i.test(trimmed)) return trimmed.toLowerCase();
-
-  if (trimmed.startsWith('npub')) {
-    const decoded = nip19.decode(trimmed);
-    if (decoded.type === 'npub' && typeof decoded.data === 'string') {
-      return decoded.data.toLowerCase();
-    }
+  const decoded = nip19.decode(trimmed);
+  if (decoded.type === 'npub' && typeof decoded.data === 'string') {
+    return decoded.data.toLowerCase();
   }
+  throw new Error('Contact must be an npub or 64-character hex pubkey.');
+}
 
-  throw new Error('Recipient must be an npub or 64-character hex pubkey.');
+function extractNpubOrPubkey(value: string): string | null {
+  const trimmed = value.trim();
+  const npub = trimmed.match(/npub1[023456789acdefghjklmnpqrstuvwxyz]+/i)?.[0];
+  if (npub) return npub;
+  const hex = trimmed.match(/\b[0-9a-f]{64}\b/i)?.[0];
+  return hex ?? null;
+}
+
+function inferMessagePeer(message: DirectMessage, selfPubkey: string): string | null {
+  if (message.peerPubkey) return normalizeRecipient(message.peerPubkey);
+  if (!message.outgoing) return normalizeRecipient(message.pubkey);
+  const taggedPeer = message.tags?.find((tag) => tag[0] === 'p' && tag[1] !== selfPubkey)?.[1];
+  return taggedPeer ? normalizeRecipient(taggedPeer) : null;
 }
 
 function shortPubkey(pubkey: string): string {
@@ -704,6 +1271,95 @@ function profileName(profile: UserProfile | null): string {
   return typeof name === 'string' ? name : '';
 }
 
+function contactsStorageKey(pubkey: string): string {
+  return `${CONTACTS_STORAGE_PREFIX}.${pubkey}`;
+}
+
+function readStoredContacts(pubkey: string): Contact[] {
+  try {
+    const raw = window.localStorage.getItem(contactsStorageKey(pubkey));
+    if (!raw) return [];
+    return parseContactsBackup(JSON.stringify({ version: 1, contacts: JSON.parse(raw) }));
+  } catch {
+    return [];
+  }
+}
+
+function parseContactsBackup(value: string): Contact[] {
+  try {
+    const parsed = JSON.parse(value) as { contacts?: unknown };
+    if (!Array.isArray(parsed.contacts)) return [];
+    return parsed.contacts.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const record = item as Partial<Contact>;
+      if (typeof record.pubkey !== 'string') return [];
+      const pubkey = normalizeRecipient(record.pubkey);
+      return [
+        {
+          pubkey,
+          npub: nip19.npubEncode(pubkey),
+          label: typeof record.label === 'string' && record.label.trim()
+            ? record.label.trim()
+            : shortPubkey(pubkey),
+          addedAt: typeof record.addedAt === 'number' ? record.addedAt : Date.now(),
+          source: record.source === 'manual' || record.source === 'qr' || record.source === 'nostr'
+            ? record.source
+            : 'dm',
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function mergeContacts(local: Contact[], remote: Contact[]): Contact[] {
+  const byPubkey = new Map<string, Contact>();
+  [...remote, ...local].forEach((contact) => {
+    byPubkey.set(contact.pubkey, {
+      ...contact,
+      source: contact.source === 'dm' ? 'nostr' : contact.source,
+    });
+  });
+  return Array.from(byPubkey.values()).sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function sortContacts(contacts: Contact[], messageMap: Map<string, ChatMessage>): Contact[] {
+  return [...contacts].sort((a, b) => {
+    const aTime = latestMessageTime(messageMap, a.pubkey) || a.addedAt;
+    const bTime = latestMessageTime(messageMap, b.pubkey) || b.addedAt;
+    return bTime - aTime;
+  });
+}
+
+function latestMessageTime(messageMap: Map<string, ChatMessage>, pubkey: string): number {
+  let latest = 0;
+  messageMap.forEach((message) => {
+    if (message.peerPubkey === pubkey) latest = Math.max(latest, message.createdAt);
+  });
+  return latest;
+}
+
+function lastMessagePreview(messages: ChatMessage[], pubkey: string): string {
+  const latest = messages
+    .filter((message) => message.peerPubkey === pubkey)
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
+  return latest?.content || '';
+}
+
+function initials(label: string): string {
+  const words = label.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '?';
+  return words.slice(0, 2).map((word) => word[0]?.toUpperCase()).join('');
+}
+
+function formatMessageTime(time: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(time));
+}
+
 function remoteLabel(
   callState: CallState,
   peerPubkey: string,
@@ -714,4 +1370,10 @@ function remoteLabel(
   if (callState === 'connecting') return 'Connecting media';
   if (callState === 'connected') return 'Connected';
   return 'No active call';
+}
+
+function getBarcodeDetector(): BarcodeDetectorCtor | null {
+  const candidate = (window as Window & { BarcodeDetector?: BarcodeDetectorCtor })
+    .BarcodeDetector;
+  return candidate ?? null;
 }
