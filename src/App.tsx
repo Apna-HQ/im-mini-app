@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DirectMessage, UserProfile } from '@apna/sdk';
 import * as nip19 from 'nostr-tools/nip19';
+import QRCode from 'qrcode';
 import {
   ArrowLeft,
   Camera,
   Check,
   ContactRound,
+  Copy,
   Keyboard,
   MessageCircle,
   Mic,
@@ -24,9 +26,9 @@ import {
   Search,
   Send,
   ShieldCheck,
+  Share2,
   Smile,
   Sun,
-  UserRound,
   Video,
   VideoOff,
   X,
@@ -113,10 +115,14 @@ function App() {
   const [addingContact, setAddingContact] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scannerStatus, setScannerStatus] = useState('');
+  const [showMyQr, setShowMyQr] = useState(false);
+  const [myQrDataUrl, setMyQrDataUrl] = useState('');
+  const [qrCopyStatus, setQrCopyStatus] = useState('');
   const [activeTab, setActiveTab] = useState<AppTab>('chats');
   const [chatOpen, setChatOpen] = useState(false);
   const [composerText, setComposerText] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [profilesByPubkey, setProfilesByPubkey] = useState<Record<string, UserProfile>>({});
   const [callId, setCallId] = useState('');
   const [callState, setCallState] = useState<CallState>('idle');
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
@@ -176,6 +182,34 @@ function App() {
     [messages, selectedPubkey]
   );
 
+  const selfNpub = useMemo(
+    () => (selfPubkey ? nip19.npubEncode(selfPubkey) : ''),
+    [selfPubkey]
+  );
+
+  const selectedProfile = selectedPubkey ? profilesByPubkey[selectedPubkey] ?? null : null;
+
+  const displayNameForContact = useCallback(
+    (contact: Contact) => profileName(profilesByPubkey[contact.pubkey] ?? null) || contact.label,
+    [profilesByPubkey]
+  );
+
+  const renderAvatar = useCallback(
+    (
+      label: string,
+      profile: UserProfile | null | undefined,
+      className = 'avatar'
+    ) => {
+      const picture = profilePicture(profile ?? null);
+      return (
+        <div className={className}>
+          {picture ? <img src={picture} alt={label} /> : <span>{initials(label)}</span>}
+        </div>
+      );
+    },
+    []
+  );
+
   const saveContacts = useCallback(
     (nextContacts: Contact[]) => {
       const sorted = sortContacts(nextContacts, messagesRef.current);
@@ -227,6 +261,19 @@ function App() {
       return normalized;
     },
     []
+  );
+
+  const fetchContactProfile = useCallback(
+    async (pubkey: string) => {
+      if (!pubkey || profilesByPubkey[pubkey]) return;
+      try {
+        const profile = await apna.social.v1.userProfile(pubkey);
+        setProfilesByPubkey((current) => ({ ...current, [pubkey]: profile }));
+      } catch {
+        // Profiles are nice-to-have; DMs and calls still work without metadata.
+      }
+    },
+    [apna, profilesByPubkey]
   );
 
   const addChatMessage = useCallback(
@@ -580,6 +627,36 @@ function App() {
     };
   }, [apna, handleDirectMessage, resetCall, upsertContact]);
 
+  useEffect(() => {
+    contacts.forEach((contact) => {
+      void fetchContactProfile(contact.pubkey);
+    });
+  }, [contacts, fetchContactProfile]);
+
+  useEffect(() => {
+    if (!selfNpub) {
+      setMyQrDataUrl('');
+      return;
+    }
+
+    let disposed = false;
+    void QRCode.toDataURL(selfNpub, {
+      errorCorrectionLevel: 'M',
+      margin: 2,
+      width: 320,
+      color: {
+        dark: '#00201c',
+        light: '#ffffff',
+      },
+    }).then((dataUrl) => {
+      if (!disposed) setMyQrDataUrl(dataUrl);
+    });
+
+    return () => {
+      disposed = true;
+    };
+  }, [selfNpub]);
+
   async function loadContactsFromNostr() {
     try {
       await apna.permissions.request([
@@ -642,6 +719,7 @@ function App() {
     setError('');
     try {
       const normalized = upsertContact(contactDraftKey, contactDraftName, source);
+      void fetchContactProfile(normalized);
       setSelectedPubkey(normalized);
       setContactDraftKey('');
       setContactDraftName('');
@@ -652,6 +730,32 @@ function App() {
     } catch (err) {
       setError((err as Error).message);
     }
+  }
+
+  async function copyMyNpub() {
+    if (!selfNpub) return;
+    try {
+      await navigator.clipboard.writeText(selfNpub);
+      setQrCopyStatus('Copied');
+      window.setTimeout(() => setQrCopyStatus(''), 1800);
+    } catch {
+      setQrCopyStatus('Copy failed');
+    }
+  }
+
+  async function shareMyNpub() {
+    if (!selfNpub) return;
+    const shareData = {
+      title: 'My Apna IM contact',
+      text: selfNpub,
+    };
+
+    if (navigator.share) {
+      await navigator.share(shareData).catch(() => undefined);
+      return;
+    }
+
+    await copyMyNpub();
   }
 
   function removeContact(pubkey: string) {
@@ -916,7 +1020,9 @@ function App() {
 
   const inCall =
     callState === 'calling' || callState === 'connecting' || callState === 'connected';
-  const selectedTitle = selectedContact?.label || shortPubkey(selectedPubkey);
+  const selectedTitle = selectedContact
+    ? displayNameForContact(selectedContact)
+    : shortPubkey(selectedPubkey);
 
   return (
     <main
@@ -930,7 +1036,18 @@ function App() {
             <MessageCircle size={22} />
             <h1>IM Mini App</h1>
           </div>
+          <div className={error ? 'app-status-chip app-status-error' : 'app-status-chip'}>
+            {error || status}
+          </div>
           <div className="top-actions">
+            <button
+              type="button"
+              className="appbar-button"
+              onClick={() => setShowMyQr(true)}
+              title="Show my QR code"
+            >
+              <QrCode size={20} />
+            </button>
             <button
               type="button"
               className="appbar-button"
@@ -970,13 +1087,14 @@ function App() {
         </div>
 
         <div className="identity-row" title={selfPubkey || 'Connecting'}>
-          <div className="avatar self-avatar">
-            <UserRound size={18} />
-          </div>
+          {renderAvatar(profileName(selfProfile) || 'You', selfProfile, 'avatar self-avatar')}
           <div>
             <strong>{profileName(selfProfile) || 'You'}</strong>
-            <span>{shortPubkey(selfPubkey) || 'Connecting'}</span>
+            <span>{selfNpub ? `${selfNpub.slice(0, 12)}...${selfNpub.slice(-6)}` : 'Connecting'}</span>
           </div>
+          <button type="button" className="identity-qr-button" onClick={() => setShowMyQr(true)}>
+            <QrCode size={18} />
+          </button>
         </div>
 
         <div className="search-row">
@@ -1000,7 +1118,10 @@ function App() {
               </span>
             </div>
           ) : (
-            tabContacts.map((contact) => (
+            tabContacts.map((contact) => {
+              const contactProfile = profilesByPubkey[contact.pubkey] ?? null;
+              const contactName = displayNameForContact(contact);
+              return (
               <button
                 key={contact.pubkey}
                 type="button"
@@ -1014,10 +1135,10 @@ function App() {
                   setChatOpen(true);
                 }}
               >
-                <div className="avatar">{initials(contact.label)}</div>
+                {renderAvatar(contactName, contactProfile)}
                 <div className="contact-main">
                   <div className="contact-line">
-                    <strong>{contact.label}</strong>
+                    <strong>{contactName}</strong>
                     <time>{lastMessageTimeLabel(messages, contact.pubkey)}</time>
                   </div>
                   <div className="contact-line contact-preview">
@@ -1026,7 +1147,8 @@ function App() {
                   </div>
                 </div>
               </button>
-            ))
+              );
+            })
           )}
         </div>
 
@@ -1082,7 +1204,7 @@ function App() {
                 <ArrowLeft size={21} />
               </button>
               <div className="peer-summary">
-                <div className="avatar">{initials(selectedTitle)}</div>
+                {renderAvatar(selectedTitle, selectedProfile)}
                 <div>
                   <h2>{selectedTitle}</h2>
                   <span>encrypted · {shortPubkey(selectedPubkey)}</span>
@@ -1254,6 +1376,62 @@ function App() {
         </section>
       )}
 
+      {showMyQr && (
+        <section className="my-qr-screen" role="dialog" aria-modal="true">
+          <header className="qr-appbar">
+            <div className="brand-lockup">
+              <button
+                type="button"
+                className="appbar-button"
+                onClick={() => setShowMyQr(false)}
+                title="Back"
+              >
+                <ArrowLeft size={21} />
+              </button>
+              <h1>My QR Code</h1>
+            </div>
+            <button type="button" className="appbar-button" title="More">
+              <MoreVertical size={20} />
+            </button>
+          </header>
+
+          <main className="my-qr-body">
+            <section className="my-qr-card">
+              <div className="my-qr-profile">
+                {renderAvatar(profileName(selfProfile) || 'You', selfProfile, 'avatar qr-profile-avatar')}
+                <h2>{profileName(selfProfile) || 'You'}</h2>
+                <button type="button" className="npub-copy-row" onClick={() => void copyMyNpub()}>
+                  <span>{selfNpub ? `${selfNpub.slice(0, 12)}...${selfNpub.slice(-8)}` : 'Loading npub'}</span>
+                  <Copy size={14} />
+                </button>
+              </div>
+
+              <div className="qr-frame">
+                {myQrDataUrl ? (
+                  <img src={myQrDataUrl} alt="My Nostr npub QR code" />
+                ) : (
+                  <div className="qr-loading">Generating QR</div>
+                )}
+              </div>
+
+              <p>Scan this code to add me as an IM Mini App contact.</p>
+              {qrCopyStatus && <span className="qr-copy-status">{qrCopyStatus}</span>}
+            </section>
+          </main>
+
+          <footer className="my-qr-actions">
+            <button type="button" className="primary-button" onClick={() => void shareMyNpub()}>
+              <Share2 size={18} />
+              <span>Share Code</span>
+            </button>
+            <button type="button" className="secondary-button" onClick={() => void copyMyNpub()}>
+              <Copy size={18} />
+              <span>Copy npub</span>
+            </button>
+          </footer>
+        </section>
+      )}
+
       {addingContact && (
         <section className="modal-backdrop" role="dialog" aria-modal="true">
           <div className={scannerOpen ? 'contact-modal scanner-modal' : 'contact-modal'}>
@@ -1303,6 +1481,10 @@ function App() {
                 <QrCode size={18} />
                 <span>{scannerOpen ? 'Stop scan' : 'Scan QR'}</span>
               </button>
+              <button type="button" className="secondary-button" onClick={() => setShowMyQr(true)}>
+                <QrCode size={18} />
+                <span>My QR</span>
+              </button>
               <button type="button" className="secondary-button" onClick={() => setContactDraftKey('')}>
                 <Keyboard size={18} />
                 <span>Clear</span>
@@ -1330,13 +1512,15 @@ function App() {
         </section>
       )}
 
-      {(status || error) && (
-        <section className={error ? 'notice error' : 'notice'}>
-          {error || status}
-          <button type="button" className="icon-button" onClick={() => window.location.reload()} title="Reload">
-            <RefreshCw size={15} />
-          </button>
-        </section>
+      {error && (
+        <button
+          type="button"
+          className="reload-fab"
+          onClick={() => window.location.reload()}
+          title="Reload"
+        >
+          <RefreshCw size={18} />
+        </button>
       )}
     </main>
   );
@@ -1399,6 +1583,14 @@ function profileName(profile: UserProfile | null): string {
   const metadata = profile?.metadata;
   const name = metadata?.display_name || metadata?.name;
   return typeof name === 'string' ? name : '';
+}
+
+function profilePicture(profile: UserProfile | null): string {
+  const metadata = profile?.metadata;
+  const picture = metadata?.picture;
+  if (typeof picture === 'string') return picture;
+  const image = metadata?.image;
+  return typeof image === 'string' ? image : '';
 }
 
 function contactsStorageKey(pubkey: string): string {

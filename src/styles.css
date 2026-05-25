@@ -186,6 +186,28 @@ textarea {
   line-height: 24px;
 }
 
+.app-status-chip {
+  min-width: 0;
+  max-width: min(34vw, 220px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.82);
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-status-error {
+  border-color: color-mix(in srgb, var(--error-container) 45%, transparent);
+  background: color-mix(in srgb, var(--error-container) 30%, transparent);
+  color: #ffdad6;
+}
+
 .top-actions,
 .header-actions,
 .scanner-tools,
@@ -246,7 +268,7 @@ p {
 
 .identity-row {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 48px minmax(0, 1fr) 40px;
   gap: 12px;
   align-items: center;
   margin: 0 16px 12px;
@@ -303,6 +325,20 @@ p {
   color: var(--on-secondary-container);
   font-size: 15px;
   font-weight: 800;
+  overflow: hidden;
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar span {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
 }
 
 .conversation-header .avatar {
@@ -328,6 +364,17 @@ p {
   background: var(--surface-container);
   padding: 10px 14px;
   color: var(--outline);
+}
+
+.identity-qr-button {
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--surface-container);
+  color: var(--primary);
+  cursor: pointer;
 }
 
 .search-row input,
@@ -1007,30 +1054,161 @@ textarea:disabled {
   backdrop-filter: blur(12px);
 }
 
-.notice {
+.my-qr-screen {
   position: fixed;
-  left: 50%;
-  bottom: 78px;
-  z-index: 45;
-  display: flex;
-  max-width: min(560px, calc(100vw - 28px));
-  align-items: center;
-  gap: 10px;
-  transform: translateX(-50%);
-  border: 1px solid color-mix(in srgb, var(--outline-variant) 60%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--surface-highest) 92%, transparent);
-  box-shadow: 0 16px 54px rgba(25, 28, 30, 0.18);
-  color: var(--on-surface-variant);
-  padding: 8px 10px 8px 14px;
-  font-size: 13px;
-  backdrop-filter: blur(12px);
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  grid-template-rows: 56px minmax(0, 1fr) auto;
+  background: var(--surface);
+  color: var(--on-surface);
 }
 
-.notice.error {
-  border-color: color-mix(in srgb, var(--error) 32%, transparent);
+.qr-appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--primary);
+  color: var(--on-primary);
+  padding: 0 16px;
+}
+
+.my-qr-body {
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  overflow: auto;
+  padding: 28px 16px;
+}
+
+.my-qr-card {
+  display: grid;
+  width: min(380px, 100%);
+  justify-items: center;
+  border-radius: 16px;
+  background: var(--surface-lowest);
+  box-shadow: 0 4px 18px rgba(25, 28, 30, 0.12);
+  padding: 28px 24px;
+  text-align: center;
+}
+
+.my-qr-profile {
+  display: grid;
+  justify-items: center;
+  margin-bottom: 22px;
+}
+
+.qr-profile-avatar {
+  width: 80px;
+  height: 80px;
+  margin-bottom: 12px;
+  border: 2px solid var(--primary);
+}
+
+.my-qr-profile h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  line-height: 24px;
+}
+
+.npub-copy-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--outline);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.qr-frame {
+  position: relative;
+  display: grid;
+  width: min(300px, 76vw);
+  aspect-ratio: 1;
+  place-items: center;
+  border: 18px solid #ffffff;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(25, 28, 30, 0.08);
+}
+
+.qr-frame::before,
+.qr-frame::after {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-color: var(--primary);
+  content: "";
+}
+
+.qr-frame::before {
+  top: -8px;
+  left: -8px;
+  border-top: 2px solid;
+  border-left: 2px solid;
+  border-top-left-radius: 4px;
+}
+
+.qr-frame::after {
+  right: -8px;
+  bottom: -8px;
+  border-right: 2px solid;
+  border-bottom: 2px solid;
+  border-bottom-right-radius: 4px;
+}
+
+.qr-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.qr-loading {
+  color: var(--outline);
+  font-size: 13px;
+}
+
+.my-qr-card p {
+  max-width: 220px;
+  margin: 18px 0 0;
+  color: var(--on-surface-variant);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.qr-copy-status {
+  margin-top: 10px;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.my-qr-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 16px;
+  background: var(--surface);
+}
+
+.reload-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 82px;
+  z-index: 45;
+  display: inline-flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
+  border-radius: 999px;
   background: var(--error-container);
+  box-shadow: 0 16px 54px rgba(25, 28, 30, 0.18);
   color: var(--on-error-container);
+  cursor: pointer;
 }
 
 @media (min-width: 900px) {
@@ -1071,9 +1249,6 @@ textarea:disabled {
     max-width: min(70%, 680px);
   }
 
-  .notice {
-    bottom: 16px;
-  }
 }
 
 @media (max-width: 520px) {
